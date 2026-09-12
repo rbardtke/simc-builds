@@ -107,7 +107,7 @@ jobs:
           mkdir -p "pkg/simc-$SHA-dbc/engine/dbc/generated"
           cp simc/engine/dbc/generated/*.inc "pkg/simc-$SHA-dbc/engine/dbc/generated/"
           (cd pkg && 7z a -tzip "../simc-$SHA-dbc.zip" "simc-$SHA-dbc" >/dev/null)
-          git -C simc archive --format=tar.gz --prefix="simc-$SHA/" -o "../../simc-$SHA-source.tar.gz" HEAD
+          git -C simc archive --format=tar.gz --prefix="simc-$SHA/" -o "$GITHUB_WORKSPACE/simc-$SHA-source.tar.gz" HEAD
           ls -la simc-*-dbc.zip simc-*-source.tar.gz
       - name: upload
         uses: actions/upload-artifact@v4
