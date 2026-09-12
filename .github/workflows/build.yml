@@ -96,7 +96,7 @@ jobs:
             echo "source of this exact build: simc-$SHA-source.tar.gz in the same release"
             echo "built by https://github.com/$GITHUB_REPOSITORY (not an official SimulationCraft release)"
           } > "pkg/$OUT/BUILD.txt"
-          "pkg/$OUT/${{ matrix.bin }}" 2>&1 | head -1 > "pkg/$OUT/VERSION.txt" || true
+          "pkg/$OUT/${{ matrix.bin }}" 2>&1 | grep -m1 -o 'SimulationCraft .*' > "pkg/$OUT/VERSION.txt" || true
           cd pkg && 7z a -tzip "../$OUT.zip" "$OUT" >/dev/null
           cd .. && ls -la "$OUT.zip"
       - name: dbc + source (linux only)
