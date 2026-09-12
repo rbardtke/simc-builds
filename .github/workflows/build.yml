@@ -1,0 +1,142 @@
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: simc commit sha (or branch) to build
+        required: false
+        default: midnight
+  schedule:
+    - cron: "15 6 * * *"
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+env:
+  SIMC_BRANCH: midnight
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.r.outputs.sha }}
+      short: ${{ steps.r.outputs.short }}
+      exists: ${{ steps.r.outputs.exists }}
+    steps:
+      - name: resolve commit
+        id: r
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          REF="${{ github.event.inputs.ref }}"
+          [ -n "$REF" ] || REF="$SIMC_BRANCH"
+          SHA=$(git ls-remote https://github.com/simulationcraft/simc.git "refs/heads/$REF" | cut -f1)
+          [ -n "$SHA" ] || SHA="$REF"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "short=${SHA:0:12}" >> "$GITHUB_OUTPUT"
+          if gh release view "simc-$SHA" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"; echo "release simc-$SHA exists, nothing to do"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.exists == 'false'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux-x64
+            bin: simc
+          - os: windows-latest
+            platform: windows-x64
+            bin: simc.exe
+          - os: macos-latest
+            platform: macos-arm64
+            bin: simc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: checkout simc
+        uses: actions/checkout@v4
+        with:
+          repository: simulationcraft/simc
+          ref: ${{ needs.resolve.outputs.sha }}
+          path: simc
+          fetch-depth: 1
+      - name: configure
+        shell: bash
+        run: |
+          cd simc
+          EXTRA=""
+          if [ "${{ matrix.platform }}" = "linux-x64" ]; then EXTRA="-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"; fi
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=OFF -DSC_NO_NETWORKING=ON -DBUILD_TESTING=OFF "$EXTRA"
+      - name: build
+        shell: bash
+        run: cmake --build simc/build --config Release --target simc --parallel 4
+      - name: package
+        shell: bash
+        run: |
+          set -e
+          SHA="${{ needs.resolve.outputs.sha }}"
+          OUT="simc-$SHA-${{ matrix.platform }}"
+          mkdir -p "pkg/$OUT"
+          BIN=$(find simc/build -name "${{ matrix.bin }}" -type f | head -1)
+          cp "$BIN" "pkg/$OUT/"
+          cp simc/LICENSE* "pkg/$OUT/" 2>/dev/null || true
+          cp simc/README.md "pkg/$OUT/README-simc.md"
+          {
+            echo "SimulationCraft, built from https://github.com/simulationcraft/simc/commit/$SHA"
+            echo "platform: ${{ matrix.platform }}  options: BUILD_GUI=OFF SC_NO_NETWORKING=ON"
+            echo "source of this exact build: simc-$SHA-source.tar.gz in the same release"
+            echo "built by https://github.com/$GITHUB_REPOSITORY (not an official SimulationCraft release)"
+          } > "pkg/$OUT/BUILD.txt"
+          "pkg/$OUT/${{ matrix.bin }}" 2>&1 | head -1 > "pkg/$OUT/VERSION.txt" || true
+          cd pkg && 7z a -tzip "../$OUT.zip" "$OUT" >/dev/null
+          cd .. && ls -la "$OUT.zip"
+      - name: dbc + source (linux only)
+        if: matrix.platform == 'linux-x64'
+        shell: bash
+        run: |
+          SHA="${{ needs.resolve.outputs.sha }}"
+          mkdir -p "pkg/simc-$SHA-dbc/engine/dbc/generated"
+          cp simc/engine/dbc/generated/*.inc "pkg/simc-$SHA-dbc/engine/dbc/generated/"
+          (cd pkg && 7z a -tzip "../simc-$SHA-dbc.zip" "simc-$SHA-dbc" >/dev/null)
+          git -C simc archive --format=tar.gz --prefix="simc-$SHA/" -o "../../simc-$SHA-source.tar.gz" HEAD
+          ls -la simc-*-dbc.zip simc-*-source.tar.gz
+      - name: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: |
+            simc-*.zip
+            simc-*-source.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [resolve, build]
+    if: needs.resolve.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: sums
+        run: |
+          cd assets && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA="${{ needs.resolve.outputs.sha }}"
+          VER=$(unzip -p "assets/simc-$SHA-linux-x64.zip" "simc-$SHA-linux-x64/VERSION.txt" 2>/dev/null | head -1 || true)
+          gh release create "simc-$SHA" assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "simc ${SHA:0:12}${VER:+ — $VER}" \
+            --notes "Unmodified SimulationCraft built from https://github.com/simulationcraft/simc/commit/$SHA (GPLv3). Source of this build: simc-$SHA-source.tar.gz. Built with BUILD_GUI=OFF SC_NO_NETWORKING=ON. Not an official SimulationCraft release."
