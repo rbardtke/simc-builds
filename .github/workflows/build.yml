@@ -35,6 +35,8 @@ jobs:
           REF="${{ github.event.inputs.ref }}"
           [ -n "$REF" ] || REF="$SIMC_BRANCH"
           SHA=$(git ls-remote https://github.com/simulationcraft/simc.git "refs/heads/$REF" | cut -f1)
+          # not a branch: a sha, possibly abbreviated — the API expands it
+          [ -n "$SHA" ] || SHA=$(gh api "repos/simulationcraft/simc/commits/$REF" --jq .sha 2>/dev/null || true)
           [ -n "$SHA" ] || SHA="$REF"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "short=${SHA:0:12}" >> "$GITHUB_OUTPUT"
