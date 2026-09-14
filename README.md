@@ -1,7 +1,7 @@
 # simc-builds
 
 Prebuilt [SimulationCraft](https://github.com/simulationcraft/simc) command-line
-binaries, one release per simc commit, for a private Localbots sim pool.
+binaries, one release per simc commit, for the [Simhive](https://simhive.sidian.app) sim pool (built on [Localbots](https://github.com/balovich-matje/localbots)).
 The pool's server pins a simc commit; its workers fetch the matching build
 from here instead of compiling it themselves.
 
