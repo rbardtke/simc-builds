@@ -119,6 +119,10 @@ jobs:
             simc-*.zip
             simc-*-source.tar.gz
           if-no-files-found: error
+          # a hand-off to the release job, not storage: the release assets are
+          # the copy that lasts. The default 90 days parked ~110 MB per daily
+          # build against a 0.5 GB Actions allowance.
+          retention-days: 1
 
   release:
     needs: [resolve, build]
