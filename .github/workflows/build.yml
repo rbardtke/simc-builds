@@ -90,7 +90,7 @@ jobs:
         run: |
           F=simc/engine/class_modules/sc_death_knight.cpp
           if grep -q '^  } pet_summon;' "$F"; then
-            sed -i 's|^  } pet_summon;|  } pet_summon{};  // simc-builds: simulationcraft/simc#11900|' "$F"
+            sed -i.orig 's|^  } pet_summon;|  } pet_summon{};  // simc-builds: simulationcraft/simc#11900|' "$F" && rm -f "$F.orig"  # -i.orig: GNU and BSD (macOS) sed both take it
             echo "applied: simulationcraft/simc#11900"
           else
             echo "not needed: simulationcraft/simc#11900"
