@@ -121,7 +121,11 @@ jobs:
         run: |
           BIN=$(find simc/build -name "${{ matrix.bin }}" -type f | head -1)
           printf 'deathknight="probe"\nlevel=90\nspec=unholy\niterations=1\n' > probe.simc
-          MIMALLOC_VERBOSE=1 "$BIN" probe.simc 2>&1 | grep -m1 'mimalloc: process init' || { echo "mimalloc is not active in $BIN"; exit 1; }
+          # to a file, not a pipe: grep stopping early would cut simc's output off mid-sim
+          code=0; MIMALLOC_VERBOSE=1 "$BIN" probe.simc > probe.log 2>&1 || code=$?
+          grep -m1 'mimalloc: process init' probe.log || { echo "mimalloc is not active in $BIN"; exit 1; }
+          [ "$code" = 0 ] || { echo "simc exited with $code under mimalloc:"; tail -20 probe.log; exit 1; }
+          grep -m1 -i 'DPS' probe.log
       - name: package
         shell: bash
         run: |
