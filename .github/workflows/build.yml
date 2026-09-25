@@ -81,6 +81,22 @@ jobs:
           ref: ${{ needs.resolve.outputs.sha }}
           path: simc
           fetch-depth: 1
+      # fixes carried until simc has them, each applied only while the unfixed
+      # line is still there (so a fixed simc retires it), recorded in simc-fixes.diff:
+      # - simulationcraft/simc#11900: Death Knight pet_summon pointers were never
+      #   initialised; an Unholy DK without Putrefy read garbage (crashes once memory is reused)
+      - name: fixes
+        shell: bash
+        run: |
+          F=simc/engine/class_modules/sc_death_knight.cpp
+          if grep -q '^  } pet_summon;' "$F"; then
+            sed -i 's|^  } pet_summon;|  } pet_summon{};  // simc-builds: simulationcraft/simc#11900|' "$F"
+            echo "applied: simulationcraft/simc#11900"
+          else
+            echo "not needed: simulationcraft/simc#11900"
+          fi
+          git -C simc diff > simc-fixes.diff
+          cat simc-fixes.diff
       # mimalloc as simc's allocator (Windows and Linux; macOS keeps its own):
       # Windows links the static library and routes C++ new/delete to it with
       # the one line mimalloc documents for that; Linux links mimalloc.o, which
@@ -95,7 +111,7 @@ jobs:
           cmake --build mimalloc/build --config Release --parallel 4
           if [ "${{ matrix.platform }}" = "windows-x64" ]; then
             sed -i '1i #include <mimalloc-new-delete.h> // simc-builds: C++ new/delete through mimalloc (rbardtke/simhive#48)' simc/engine/sc_main.cpp
-            git -C simc diff > simc-mimalloc.diff
+            git -C simc diff -- engine/sc_main.cpp > simc-mimalloc.diff
             head -2 simc/engine/sc_main.cpp
           fi
       - name: configure
@@ -120,7 +136,9 @@ jobs:
         shell: bash
         run: |
           BIN=$(find simc/build -name "${{ matrix.bin }}" -type f | head -1)
-          printf 'deathknight="probe"\nlevel=90\nspec=unholy\niterations=1\n' > probe.simc
+          # a talentless Unholy DK with profilesets: the case of simulationcraft/simc#11900, where memory gets reused
+          printf '%s\n' 'deathknight="probe"' 'level=90' 'spec=unholy' 'main_hand=,id=268213' 'iterations=1' > probe.simc
+          for i in $(seq 1 20); do echo "profileset.\"p$i\"+=enchant_crit_rating=$((i*10))" >> probe.simc; done
           # to a file, not a pipe: grep stopping early would cut simc's output off mid-sim
           code=0; MIMALLOC_VERBOSE=1 "$BIN" probe.simc > probe.log 2>&1 || code=$?
           grep -m1 'mimalloc: process init' probe.log || { echo "mimalloc is not active in $BIN"; exit 1; }
@@ -139,11 +157,13 @@ jobs:
           cp simc/README.md "pkg/$OUT/README-simc.md"
           if [ -d mimalloc ]; then cp mimalloc/LICENSE "pkg/$OUT/LICENSE.mimalloc"; fi
           if [ -s simc-mimalloc.diff ]; then cp simc-mimalloc.diff "pkg/$OUT/"; fi
+          if [ -s simc-fixes.diff ]; then cp simc-fixes.diff "pkg/$OUT/"; fi
           {
             echo "SimulationCraft, built from https://github.com/simulationcraft/simc/commit/$SHA"
             echo "platform: ${{ matrix.platform }}  options: BUILD_GUI=OFF SC_NO_NETWORKING=ON"
             if [ -s simc-mimalloc.diff ]; then echo "allocator: mimalloc $MIMALLOC_VERSION (MIT, https://github.com/microsoft/mimalloc), static library; one line added to engine/sc_main.cpp: simc-mimalloc.diff"
-            elif [ -d mimalloc ]; then echo "allocator: mimalloc $MIMALLOC_VERSION (MIT, https://github.com/microsoft/mimalloc), linked as mimalloc.o; simc's source unchanged"; fi
+            elif [ -d mimalloc ]; then echo "allocator: mimalloc $MIMALLOC_VERSION (MIT, https://github.com/microsoft/mimalloc), linked as mimalloc.o"; fi
+            if [ -s simc-fixes.diff ]; then echo "fixes carried until simc has them: simc-fixes.diff (simulationcraft/simc#11900)"; fi
             echo "source of this exact build: simc-$SHA-source.tar.gz in the same release"
             echo "built by https://github.com/$GITHUB_REPOSITORY (not an official SimulationCraft release)"
           } > "pkg/$OUT/BUILD.txt"
@@ -196,4 +216,4 @@ jobs:
           gh release create "simc-$SHA" assets/* \
             --repo "$GITHUB_REPOSITORY" \
             --title "simc ${SHA:0:12}${VER:+ — $VER}" \
-            --notes "SimulationCraft built from https://github.com/simulationcraft/simc/commit/$SHA (GPLv3), with BUILD_GUI=OFF SC_NO_NETWORKING=ON. Windows and Linux builds use mimalloc $MIMALLOC_VERSION (MIT) as the allocator — on Windows with one line added to engine/sc_main.cpp (simc-mimalloc.diff in the zip), on Linux linked in without a source change; no change to what simc computes. Source of this build: simc-$SHA-source.tar.gz and simc-$SHA-mimalloc-source.tar.gz. Not an official SimulationCraft release."
+            --notes "SimulationCraft built from https://github.com/simulationcraft/simc/commit/$SHA (GPLv3), with BUILD_GUI=OFF SC_NO_NETWORKING=ON. Windows and Linux builds use mimalloc $MIMALLOC_VERSION (MIT) as the allocator — on Windows with one line added to engine/sc_main.cpp (simc-mimalloc.diff in the zip), on Linux linked in without a source change; no change to what simc computes. Carries fixes simc does not have yet, while it does not (simc-fixes.diff in each zip; simulationcraft/simc#11900). Source of this build: simc-$SHA-source.tar.gz and simc-$SHA-mimalloc-source.tar.gz. Not an official SimulationCraft release."
