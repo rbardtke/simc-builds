@@ -7,6 +7,11 @@ on:
         description: simc commit sha (or branch) to build
         required: false
         default: midnight
+      test:
+        description: build only — the zips stay run artifacts, no release (the channel is untouched)
+        type: boolean
+        required: false
+        default: false
   schedule:
     - cron: "15 6 * * *"
   push:
@@ -18,6 +23,9 @@ permissions:
 
 env:
   SIMC_BRANCH: midnight
+  # the allocator of the Windows and Linux builds (MIT, github.com/microsoft/mimalloc):
+  # ~9 % faster on Windows, 2–4 % on Linux, identical results (rbardtke/simhive#48)
+  MIMALLOC_VERSION: v3.5.3
 
 jobs:
   resolve:
@@ -40,7 +48,9 @@ jobs:
           [ -n "$SHA" ] || SHA="$REF"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "short=${SHA:0:12}" >> "$GITHUB_OUTPUT"
-          if gh release view "simc-$SHA" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if [ "${{ github.event.inputs.test }}" = "true" ]; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"; echo "test build: no release"
+          elif gh release view "simc-$SHA" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"; echo "release simc-$SHA exists, nothing to do"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
@@ -71,16 +81,47 @@ jobs:
           ref: ${{ needs.resolve.outputs.sha }}
           path: simc
           fetch-depth: 1
+      # mimalloc as simc's allocator (Windows and Linux; macOS keeps its own):
+      # Windows links the static library and routes C++ new/delete to it with
+      # the one line mimalloc documents for that; Linux links mimalloc.o, which
+      # replaces malloc and new/delete itself — no source change there
+      - name: mimalloc
+        if: matrix.platform != 'macos-arm64'
+        shell: bash
+        run: |
+          set -e
+          git clone -q --depth 1 --branch "$MIMALLOC_VERSION" https://github.com/microsoft/mimalloc.git mimalloc
+          cmake -S mimalloc -B mimalloc/build -DCMAKE_BUILD_TYPE=Release -DMI_BUILD_SHARED=OFF -DMI_BUILD_TESTS=OFF -DMI_BUILD_OBJECT=${{ matrix.platform == 'linux-x64' && 'ON' || 'OFF' }}
+          cmake --build mimalloc/build --config Release --parallel 4
+          if [ "${{ matrix.platform }}" = "windows-x64" ]; then
+            sed -i '1i #include <mimalloc-new-delete.h> // simc-builds: C++ new/delete through mimalloc (rbardtke/simhive#48)' simc/engine/sc_main.cpp
+            git -C simc diff > simc-mimalloc.diff
+            head -2 simc/engine/sc_main.cpp
+          fi
       - name: configure
         shell: bash
         run: |
           cd simc
-          EXTRA=""
-          if [ "${{ matrix.platform }}" = "linux-x64" ]; then EXTRA="-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"; fi
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=OFF -DSC_NO_NETWORKING=ON -DBUILD_TESTING=OFF "$EXTRA"
+          MI="$GITHUB_WORKSPACE/mimalloc"
+          if [ "${{ matrix.platform }}" = "linux-x64" ]; then
+            CXXFLAGS="-I$MI/include" cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=OFF -DSC_NO_NETWORKING=ON -DBUILD_TESTING=OFF "-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc $(find "$MI/build" -name 'mimalloc.o' | head -1)"
+          elif [ "${{ matrix.platform }}" = "windows-x64" ]; then
+            # MSVC takes -D and -I too; Git Bash would turn /D into a path
+            CXXFLAGS="-I$(cygpath -m "$MI/include")" LDFLAGS="$(cygpath -m "$MI/build/Release/mimalloc.lib")" cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=OFF -DSC_NO_NETWORKING=ON -DBUILD_TESTING=OFF
+          else
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=OFF -DSC_NO_NETWORKING=ON -DBUILD_TESTING=OFF
+          fi
       - name: build
         shell: bash
         run: cmake --build simc/build --config Release --target simc --parallel 4
+      # a build that says mimalloc but does not run it would be the worst of both
+      - name: mimalloc is in
+        if: matrix.platform != 'macos-arm64'
+        shell: bash
+        run: |
+          BIN=$(find simc/build -name "${{ matrix.bin }}" -type f | head -1)
+          printf 'deathknight="probe"\nlevel=90\nspec=unholy\niterations=1\n' > probe.simc
+          MIMALLOC_VERBOSE=1 "$BIN" probe.simc 2>&1 | grep -m1 'mimalloc: process init' || { echo "mimalloc is not active in $BIN"; exit 1; }
       - name: package
         shell: bash
         run: |
@@ -92,9 +133,13 @@ jobs:
           cp "$BIN" "pkg/$OUT/"
           cp simc/LICENSE* "pkg/$OUT/" 2>/dev/null || true
           cp simc/README.md "pkg/$OUT/README-simc.md"
+          if [ -d mimalloc ]; then cp mimalloc/LICENSE "pkg/$OUT/LICENSE.mimalloc"; fi
+          if [ -s simc-mimalloc.diff ]; then cp simc-mimalloc.diff "pkg/$OUT/"; fi
           {
             echo "SimulationCraft, built from https://github.com/simulationcraft/simc/commit/$SHA"
             echo "platform: ${{ matrix.platform }}  options: BUILD_GUI=OFF SC_NO_NETWORKING=ON"
+            if [ -s simc-mimalloc.diff ]; then echo "allocator: mimalloc $MIMALLOC_VERSION (MIT, https://github.com/microsoft/mimalloc), static library; one line added to engine/sc_main.cpp: simc-mimalloc.diff"
+            elif [ -d mimalloc ]; then echo "allocator: mimalloc $MIMALLOC_VERSION (MIT, https://github.com/microsoft/mimalloc), linked as mimalloc.o; simc's source unchanged"; fi
             echo "source of this exact build: simc-$SHA-source.tar.gz in the same release"
             echo "built by https://github.com/$GITHUB_REPOSITORY (not an official SimulationCraft release)"
           } > "pkg/$OUT/BUILD.txt"
@@ -110,6 +155,8 @@ jobs:
           cp simc/engine/dbc/generated/*.inc "pkg/simc-$SHA-dbc/engine/dbc/generated/"
           (cd pkg && 7z a -tzip "../simc-$SHA-dbc.zip" "simc-$SHA-dbc" >/dev/null)
           git -C simc archive --format=tar.gz --prefix="simc-$SHA/" -o "$GITHUB_WORKSPACE/simc-$SHA-source.tar.gz" HEAD
+          # the rest of the corresponding source: the allocator (Windows' one-line change is simc-mimalloc.diff in its zip)
+          git -C mimalloc archive --format=tar.gz --prefix="mimalloc-$MIMALLOC_VERSION/" -o "$GITHUB_WORKSPACE/simc-$SHA-mimalloc-source.tar.gz" HEAD
           ls -la simc-*-dbc.zip simc-*-source.tar.gz
       - name: upload
         uses: actions/upload-artifact@v4
@@ -126,7 +173,7 @@ jobs:
 
   release:
     needs: [resolve, build]
-    if: needs.resolve.outputs.exists == 'false'
+    if: needs.resolve.outputs.exists == 'false' && github.event.inputs.test != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -145,4 +192,4 @@ jobs:
           gh release create "simc-$SHA" assets/* \
             --repo "$GITHUB_REPOSITORY" \
             --title "simc ${SHA:0:12}${VER:+ — $VER}" \
-            --notes "Unmodified SimulationCraft built from https://github.com/simulationcraft/simc/commit/$SHA (GPLv3). Source of this build: simc-$SHA-source.tar.gz. Built with BUILD_GUI=OFF SC_NO_NETWORKING=ON. Not an official SimulationCraft release."
+            --notes "SimulationCraft built from https://github.com/simulationcraft/simc/commit/$SHA (GPLv3), with BUILD_GUI=OFF SC_NO_NETWORKING=ON. Windows and Linux builds use mimalloc $MIMALLOC_VERSION (MIT) as the allocator — on Windows with one line added to engine/sc_main.cpp (simc-mimalloc.diff in the zip), on Linux linked in without a source change; no change to what simc computes. Source of this build: simc-$SHA-source.tar.gz and simc-$SHA-mimalloc-source.tar.gz. Not an official SimulationCraft release."
