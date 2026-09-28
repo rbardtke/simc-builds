@@ -12,6 +12,11 @@ on:
         type: boolean
         required: false
         default: false
+      backfill:
+        description: the release exists — build anyway and add the platform zips it lacks (a platform added later, e.g. linux-arm64)
+        type: boolean
+        required: false
+        default: false
   schedule:
     - cron: "15 6 * * *"
   push:
@@ -58,13 +63,18 @@ jobs:
 
   build:
     needs: resolve
-    if: needs.resolve.outputs.exists == 'false'
+    if: needs.resolve.outputs.exists == 'false' || github.event.inputs.backfill == 'true'
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-22.04
             platform: linux-x64
+            bin: simc
+          # ARM64 Linux (an Ampere cloud box, a Raspberry Pi 5, a phone on
+          # postmarketOS): the same flags as linux-x64, glibc 2.35 as the floor
+          - os: ubuntu-22.04-arm
+            platform: linux-arm64
             bin: simc
           - os: windows-latest
             platform: windows-x64
@@ -107,7 +117,7 @@ jobs:
         run: |
           set -e
           git clone -q --depth 1 --branch "$MIMALLOC_VERSION" https://github.com/microsoft/mimalloc.git mimalloc
-          cmake -S mimalloc -B mimalloc/build -DCMAKE_BUILD_TYPE=Release -DMI_BUILD_SHARED=OFF -DMI_BUILD_TESTS=OFF -DMI_BUILD_OBJECT=${{ matrix.platform == 'linux-x64' && 'ON' || 'OFF' }}
+          cmake -S mimalloc -B mimalloc/build -DCMAKE_BUILD_TYPE=Release -DMI_BUILD_SHARED=OFF -DMI_BUILD_TESTS=OFF -DMI_BUILD_OBJECT=${{ startsWith(matrix.platform, 'linux-') && 'ON' || 'OFF' }}
           cmake --build mimalloc/build --config Release --parallel 4
           if [ "${{ matrix.platform }}" = "windows-x64" ]; then
             sed -i '1i #include <mimalloc-new-delete.h> // simc-builds: C++ new/delete through mimalloc (rbardtke/simhive#48)' simc/engine/sc_main.cpp
@@ -119,7 +129,7 @@ jobs:
         run: |
           cd simc
           MI="$GITHUB_WORKSPACE/mimalloc"
-          if [ "${{ matrix.platform }}" = "linux-x64" ]; then
+          if [[ "${{ matrix.platform }}" == linux-* ]]; then
             CXXFLAGS="-I$MI/include" cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=OFF -DSC_NO_NETWORKING=ON -DBUILD_TESTING=OFF "-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc $(find "$MI/build" -name 'mimalloc.o' | head -1)"
           elif [ "${{ matrix.platform }}" = "windows-x64" ]; then
             # MSVC takes -D and -I too; Git Bash would turn /D into a path
@@ -197,7 +207,7 @@ jobs:
 
   release:
     needs: [resolve, build]
-    if: needs.resolve.outputs.exists == 'false' && github.event.inputs.test != 'true'
+    if: (needs.resolve.outputs.exists == 'false' || github.event.inputs.backfill == 'true') && github.event.inputs.test != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -212,6 +222,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           SHA="${{ needs.resolve.outputs.sha }}"
+          if [ "${{ needs.resolve.outputs.exists }}" = "true" ]; then
+            # backfill: only the zips the release does not have yet, and their
+            # lines appended to its SHA256SUMS — the assets already out stay
+            # byte for byte what they were (clients verify them by these sums)
+            HAVE=$(gh release view "simc-$SHA" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+            gh release download "simc-$SHA" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir old
+            NEW=""
+            for f in assets/simc-*.zip; do
+              n=$(basename "$f")
+              echo "$HAVE" | grep -qx "$n" || NEW="$NEW $f"
+            done
+            if [ -z "$NEW" ]; then echo "release simc-$SHA has every platform already"; exit 0; fi
+            cp old/SHA256SUMS assets/SHA256SUMS
+            for f in $NEW; do (cd assets && sha256sum "$(basename "$f")") >> assets/SHA256SUMS; done
+            cat assets/SHA256SUMS
+            gh release upload "simc-$SHA" $NEW assets/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+            echo "added to simc-$SHA:$NEW"
+            exit 0
+          fi
           VER=$(unzip -p "assets/simc-$SHA-linux-x64.zip" "simc-$SHA-linux-x64/VERSION.txt" 2>/dev/null | head -1 || true)
           gh release create "simc-$SHA" assets/* \
             --repo "$GITHUB_REPOSITORY" \
